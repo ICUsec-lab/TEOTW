@@ -3,6 +3,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import re
 import random
+import argparse
 
 headers = {"User-Agent": "Mozilla/5.0 (compatible)"}
 visited = set()
@@ -63,17 +64,16 @@ def extract_forms(page, base_url):
     soup = BeautifulSoup(page, "html.parser")
     forms = []
     for form in soup.find_all("form"):
-        form_details = {}
-        form_details["action"] = urljoin(base_url, form.get("action", ""))
-        form_details["method"] = form.get("method", "get").lower()
-        inputs = []
+        form_details = {
+            "action": urljoin(base_url, form.get("action", "")),
+            "method": form.get("method", "get").lower(),
+            "inputs": []
+        }
         for input_tag in form.find_all("input"):
-            input_info = {
+            form_details["inputs"].append({
                 "name": input_tag.get("name"),
                 "type": input_tag.get("type", "text")
-            }
-            inputs.append(input_info)
-        form_details["inputs"] = inputs
+            })
         forms.append(form_details)
     return forms
 
@@ -88,9 +88,7 @@ def search_sensitive_keywords(page):
     for keyword in keywords:
         if keyword in clean_text:
             index = clean_text.find(keyword)
-            start = max(index - 30, 0)
-            end = min(index + 30 + len(keyword), len(clean_text))
-            snippet = text[start:end]
+            snippet = text[max(index - 30, 0):min(index + 30 + len(keyword), len(clean_text))]
             snippet_n = re.sub(r'\s+', ' ', snippet.strip())
             found[keyword] = snippet_n
     return found
@@ -104,10 +102,8 @@ def submit_form(session, form, base_url):
         if name:
             payload[name] = 'admin'
     if method == 'post':
-        resp = session.post(action_url, data=payload, headers=headers)
-    else:
-        resp = session.get(action_url, params=payload, headers=headers)
-    return resp
+        return session.post(action_url, data=payload, headers=headers)
+    return session.get(action_url, params=payload, headers=headers)
 
 def crawl(url, depth=0, max_depth=2):
     if depth > max_depth or url in visited:
@@ -150,7 +146,29 @@ def crawl(url, depth=0, max_depth=2):
 
 if __name__ == "__main__":
     print_banner()
-    target = input("Put the target to crawl: ")
-    if not target.startswith(("http://", "https://")):
-        target = "http://" + target
-    crawl(target)
+
+    parser = argparse.ArgumentParser(description="TEOTW - The Eye Of The Web: Web Crawler & Scanner")
+    parser.add_argument("-u", "--url", help="Target single URL")
+    parser.add_argument("-l", "--list", help="File with list of URLs")
+
+    args = parser.parse_args()
+
+    targets = []
+
+    if args.url:
+        targets.append(args.url.strip())
+    elif args.list:
+        try:
+            with open(args.list, 'r') as f:
+                targets = [line.strip() for line in f if line.strip()]
+        except FileNotFoundError:
+            print(f"Error: File {args.list} not found.")
+            exit()
+    else:
+        print("Usage: python teotw.py -u <url> or -l <listfile>")
+        exit()
+
+    for target in targets:
+        if not target.startswith(("http://", "https://")):
+            target = "http://" + target
+        crawl(target)

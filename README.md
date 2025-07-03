@@ -1,42 +1,52 @@
-# TEOTW - The Eye Of The Web 👁️
+# TEOTW - The Eye Of The Web
 
-**TEOTW** (*The Eye Of The Web*) is a lightweight Python-based crawler and reconnaissance tool built for ethical hackers and bug bounty hunters.
+TEOTW is a Python-based web crawler and scanner designed to help security researchers and pentesters perform reconnaissance on web applications. It fetches pages, extracts links and forms, searches for sensitive keywords, and optionally submits forms with test data.
 
-It crawls web targets recursively, extracts forms and links, searches for sensitive keywords, and tests basic form submissions — all from one terminal command.
+## Features
 
-## 🛠️ Features
+- Recursive crawling up to a configurable depth
+- Extraction of hyperlinks within the same domain
+- Identification and submission of HTML forms with dummy data
+- Detection of sensitive keywords such as passwords, secrets, and usernames
+- Supports scanning a single URL or a list of URLs from a file
+- Session handling and request headers customization
+- Pretty ASCII banners at startup
 
-- 🔗 Recursive link crawler
-- 📝 HTML form extractor + auto submit
-- 🕵️ Sensitive keyword sniffer (`password`, `username`, `secret`, `pass`)
-- 📶 Session-aware with response handling
-- 🧠 Depth-limited crawling to prevent loops
+## Requirements
 
-## 📦 Requirements
+- Python 3.x
+- `requests` library
+- `beautifulsoup4` library
 
-- Python 3.6+
-- `requests`
-- `beautifulsoup4`
+Install dependencies with:
 
 ```bash
 pip install requests beautifulsoup4
 ```
-## 🚀 Usage
+
+## Usage
+Run the tool with one of the following options:
+
+Scan a single URL:
+
 ```bash
-python teotw.py
+python teotw.py -u http://example.com
 ```
-
-## 📚 Example Output
-```yaml
-Crawling URL (depth 1): http://example.com
-  Forms Found: 1
-    - Action: /login
-    - Inputs: username, password
-  Keywords Found:
-    - password: "Enter your password to continue"
-  Links Found: 8
+Scan multiple URLs from a file:
+```bash
+python teotw.py -l targets.txt
 ```
+The targets.txt file should contain one URL per line.
 
-### ⚠️ Legal Disclaimer
-Use TEOTW only on systems you own or have explicit permission to test. Unauthorized scanning is illegal and unethical.
+
+## Notes
+By default, the crawler limits recursion depth to 2.
+
+URLs without http:// or https:// will have http:// prepended automatically.
+
+The tool submits forms with a dummy value "admin" for all input fields.
+
+Use responsibly and only against sites you have permission to test.
+
+
 
