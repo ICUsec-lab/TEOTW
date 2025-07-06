@@ -5,7 +5,7 @@ import re
 import random
 import argparse
 
-headers = {"User-Agent": "Mozilla/5.0 (compatible)"}
+headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0 Safari/537.36"}
 visited = set()
 
 ascii_banners = [
@@ -44,10 +44,11 @@ def print_banner():
 def fetch_web_page(url):
     try:
         response = requests.get(url, timeout=5, headers=headers)
+        print(f"[DEBUG] {url} -> {response.status_code}")
         if response.status_code in [200, 500]:
             return response.text
-    except:
-        return None
+    except Exception as e:
+        print(f"[ERROR] {url} -> {e}")
     return None
 
 def extract_links(page, base_url):
@@ -81,16 +82,16 @@ def search_sensitive_keywords(page):
     soup = BeautifulSoup(page, "html.parser")
     for tag in soup(["script", "style"]):
         tag.decompose()
-    text = soup.get_text()
-    clean_text = text.lower()
+    text = soup.get_text().lower()
     keywords = ["password", "secret", "pass", "username"]
     found = {}
     for keyword in keywords:
-        if keyword in clean_text:
-            index = clean_text.find(keyword)
-            snippet = text[max(index - 30, 0):min(index + 30 + len(keyword), len(clean_text))]
-            snippet_n = re.sub(r'\s+', ' ', snippet.strip())
-            found[keyword] = snippet_n
+        if keyword in text:
+            index = text.find(keyword)
+            start = max(index - 30, 0)
+            end = min(index + 30 + len(keyword), len(text))
+            snippet = soup.get_text()[start:end]
+            found[keyword] = re.sub(r'\s+', ' ', snippet.strip())
     return found
 
 def submit_form(session, form, base_url):
@@ -98,12 +99,17 @@ def submit_form(session, form, base_url):
     method = form.get('method', 'get').lower()
     payload = {}
     for field in form.get('inputs', []):
-        name = field.get('name')
-        if name:
-            payload[name] = 'admin'
-    if method == 'post':
-        return session.post(action_url, data=payload, headers=headers)
-    return session.get(action_url, params=payload, headers=headers)
+        if field.get('name'):
+            payload[field['name']] = 'admin'
+    try:
+        if method == 'post':
+            resp = session.post(action_url, data=payload, headers=headers)
+        else:
+            resp = session.get(action_url, params=payload, headers=headers)
+        return resp
+    except Exception as e:
+        print(f"[ERROR] Submitting form to {action_url} -> {e}")
+        return None
 
 def crawl(url, depth=0, max_depth=2):
     if depth > max_depth or url in visited:
@@ -131,11 +137,11 @@ def crawl(url, depth=0, max_depth=2):
             print(f"    Form #{i}:")
             print(f"      Action: {form['action']}")
             print(f"      Method: {form['method']}")
-            print(f"      Inputs:")
             for inp in form["inputs"]:
                 print(f"        - name: {inp['name']}, type: {inp['type']}")
             resp = submit_form(session, form, url)
-            print(f"      Form submission response code: {resp.status_code}")
+            if resp:
+                print(f"      Form submission response code: {resp.status_code}")
 
     links = extract_links(page, url)
     print(f"  Links Found: {len(links)}")
@@ -145,13 +151,12 @@ def crawl(url, depth=0, max_depth=2):
         crawl(link, depth + 1, max_depth)
 
 if __name__ == "__main__":
-    print_banner()
-
-    parser = argparse.ArgumentParser(description="TEOTW - The Eye Of The Web: Web Crawler & Scanner")
-    parser.add_argument("-u", "--url", help="Target single URL")
-    parser.add_argument("-l", "--list", help="File with list of URLs")
-
+    parser = argparse.ArgumentParser(description="TEOTW - The Eye Of The Web - Web Crawler & Scanner")
+    parser.add_argument("-u", "--url", help="Target URL to scan")
+    parser.add_argument("-l", "--list", help="File containing list of URLs to scan")
     args = parser.parse_args()
+
+    print_banner()
 
     targets = []
 
@@ -159,14 +164,14 @@ if __name__ == "__main__":
         targets.append(args.url.strip())
     elif args.list:
         try:
-            with open(args.list, 'r') as f:
-                targets = [line.strip() for line in f if line.strip()]
-        except FileNotFoundError:
-            print(f"Error: File {args.list} not found.")
-            exit()
+            with open(args.list, 'r') as file:
+                targets.extend([line.strip() for line in file if line.strip()])
+        except Exception as e:
+            print(f"[ERROR] Failed to read file: {e}")
+            exit(1)
     else:
-        print("Usage: python teotw.py -u <url> or -l <listfile>")
-        exit()
+        print("[-] Please provide a URL (-u) or list of URLs (-l)")
+        exit(1)
 
     for target in targets:
         if not target.startswith(("http://", "https://")):
