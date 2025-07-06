@@ -1,32 +1,15 @@
+#!/usr/bin/env python3
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse, parse_qsl, urlencode
+import argparse
 import re
 import random
-import argparse
-
-headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0 Safari/537.36"}
-visited = set()
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 ascii_banners = [
-    r"""
-████████╗███████╗ ██████╗ ████████╗██╗    ██╗██╗
-╚══██╔══╝██╔════╝██╔═══██╗╚══██╔══╝██║    ██║██║
-   ██║   █████╗  ██║   ██║   ██║   ██║ █╗ ██║██║
-   ██║   ██╔══╝  ██║   ██║   ██║   ██║███╗██║██║
-   ██║   ███████╗╚██████╔╝   ██║   ╚███╔███╔╝██║
-   ╚═╝   ╚══════╝ ╚═════╝    ╚═╝    ╚══╝╚══╝ ╚═╝
-        TEOTW - The Eye Of The Web
-""",
-    r"""
- _______ ______  _____  _______ __          __
-|__   __|  ____|/ ____||__   __|\ \        / /
-   | |  | |__  | (___     | |    \ \  /\  / / 
-   | |  |  __|  \___ \    | |     \ \/  \/ /  
-   | |  | |____ ____) |   | |      \  /\  /   
-   |_|  |______|_____/    |_|       \/  \/    
-          TEOTW - The Eye Of The Web
-""",
     r"""
   _______ _______ _______ _______ _     _ 
  (_______|_______|_______|_______|_)   (_)
@@ -35,145 +18,157 @@ ascii_banners = [
  | |_____| |_____| |_____| |_____| |   | |
   \______)_______)_______)_______)_|   |_| 
           TEOTW - The Eye Of The Web
-"""
+    """,
+    r"""
+ _______ ______  _____  _______ __          __
+|__   __|  ____|/ ____||__   __|\ \        / /
+   | |  | |__  | (___     | |    \ \  /\  / / 
+   | |  |  __|  \___ \    | |     \ \/  \/ /  
+   | |  | |____ ____) |   | |      \  /\  /   
+   |_|  |______|_____/    |_|       \/  \/    
+          TEOTW - The Eye Of The Web
+    """
+]
+
+visited_lock = threading.Lock()
+visited = set()
+sensitive_keywords = [
+    "password", "user", "username", "pass", "admin", "login",
+    "email", "secret", "token", "key"
 ]
 
 def print_banner():
     print(random.choice(ascii_banners))
 
-def fetch_web_page(url):
+def normalize_url(url):
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    netloc = parsed.netloc.lower()
+    path = parsed.path.rstrip('/')  # remove trailing slash
+    query = urlencode(sorted(parse_qsl(parsed.query)))
+    return urlunparse((scheme, netloc, path, '', query, ''))
+
+def is_same_domain(url, base_netloc):
+    return urlparse(url).netloc.lower() == base_netloc.lower()
+
+def get_forms(url):
     try:
-        response = requests.get(url, timeout=5, headers=headers)
-        print(f"[DEBUG] {url} -> {response.status_code}")
-        if response.status_code in [200, 500]:
-            return response.text
-    except Exception as e:
-        print(f"[ERROR] {url} -> {e}")
-    return None
+        res = requests.get(url, timeout=10)
+        soup = BeautifulSoup(res.content, "html.parser")
+        return soup.find_all("form")
+    except Exception:
+        return []
 
-def extract_links(page, base_url):
-    soup = BeautifulSoup(page, "html.parser")
-    links = set()
-    for tag in soup.find_all("a", href=True):
-        link = urljoin(base_url, tag["href"])
-        clean_link = link.split('#')[0]
-        if urlparse(clean_link).netloc == urlparse(base_url).netloc:
-            links.add(clean_link)
-    return list(links)
-
-def extract_forms(page, base_url):
-    soup = BeautifulSoup(page, "html.parser")
-    forms = []
-    for form in soup.find_all("form"):
-        form_details = {
-            "action": urljoin(base_url, form.get("action", "")),
-            "method": form.get("method", "get").lower(),
-            "inputs": []
-        }
-        for input_tag in form.find_all("input"):
-            form_details["inputs"].append({
-                "name": input_tag.get("name"),
-                "type": input_tag.get("type", "text")
-            })
-        forms.append(form_details)
-    return forms
-
-def search_sensitive_keywords(page):
-    soup = BeautifulSoup(page, "html.parser")
-    for tag in soup(["script", "style"]):
-        tag.decompose()
-    text = soup.get_text().lower()
-    keywords = ["password", "secret", "pass", "username"]
-    found = {}
-    for keyword in keywords:
-        if keyword in text:
-            index = text.find(keyword)
-            start = max(index - 30, 0)
-            end = min(index + 30 + len(keyword), len(text))
-            snippet = soup.get_text()[start:end]
-            found[keyword] = re.sub(r'\s+', ' ', snippet.strip())
-    return found
-
-def submit_form(session, form, base_url):
-    action_url = urljoin(base_url, form.get('action'))
-    method = form.get('method', 'get').lower()
-    payload = {}
-    for field in form.get('inputs', []):
-        if field.get('name'):
-            payload[field['name']] = 'admin'
+def submit_form(form, url):
     try:
-        if method == 'post':
-            resp = session.post(action_url, data=payload, headers=headers)
+        action = form.attrs.get("action", "")
+        method = form.attrs.get("method", "get").lower()
+        inputs = form.find_all(["input", "textarea", "select"])
+        data = {}
+
+        for input_tag in inputs:
+            name = input_tag.attrs.get("name")
+            input_type = input_tag.attrs.get("type", "text")
+            if name:
+                data[name] = "test"
+
+        form_url = urljoin(url, action)
+        if method == "post":
+            res = requests.post(form_url, data=data)
         else:
-            resp = session.get(action_url, params=payload, headers=headers)
-        return resp
-    except Exception as e:
-        print(f"[ERROR] Submitting form to {action_url} -> {e}")
+            res = requests.get(form_url, params=data)
+
+        return res.status_code
+    except Exception:
         return None
 
-def crawl(url, depth=0, max_depth=2):
-    if depth > max_depth or url in visited:
+def crawl(url, depth, max_depth, base_netloc, clear, executor, futures):
+    url_norm = normalize_url(url)
+
+    with visited_lock:
+        if url_norm in visited or depth > max_depth:
+            return
+        visited.add(url_norm)
+
+        # Print URL only once here, after adding to visited
+        if clear:
+            print(url, flush=True)
+
+    try:
+        res = requests.get(url, timeout=10)
+        if not clear:
+            print(f"Crawling URL (depth {depth}): {url}")
+            print(f"[DEBUG] {url} -> {res.status_code}")
+    except Exception:
         return
-    visited.add(url)
-    print("\n------------------------------------------------------------")
-    print(f"Crawling URL (depth {depth}): {url}")
-    page = fetch_web_page(url)
-    if not page:
-        print("  Failed to fetch content.")
-        return
 
-    found_keywords = search_sensitive_keywords(page)
-    if found_keywords:
-        print("  Sensitive Keywords Found:")
-        for k, v in found_keywords.items():
-            print(f"    - {k}: {v[:60]}")
-    else:
-        print("  Sensitive Keywords Found: None")
+    content = res.text
+    if not clear:
+        found_sensitive = []
+        for keyword in sensitive_keywords:
+            if re.search(rf"\b{keyword}\b", content, re.IGNORECASE):
+                found_sensitive.append(keyword)
 
-    forms = extract_forms(page, url)
-    print(f"  Forms Found: {len(forms)}")
-    with requests.Session() as session:
-        for i, form in enumerate(forms, 1):
-            print(f"    Form #{i}:")
-            print(f"      Action: {form['action']}")
-            print(f"      Method: {form['method']}")
-            for inp in form["inputs"]:
-                print(f"        - name: {inp['name']}, type: {inp['type']}")
-            resp = submit_form(session, form, url)
-            if resp:
-                print(f"      Form submission response code: {resp.status_code}")
+        if found_sensitive:
+            print("  Sensitive Keywords Found:")
+            for keyword in found_sensitive:
+                print(f"    - {keyword}")
 
-    links = extract_links(page, url)
-    print(f"  Links Found: {len(links)}")
-    for l in links:
-        print(f"    - {l}")
-    for link in links:
-        crawl(link, depth + 1, max_depth)
+        forms = get_forms(url)
+        if forms:
+            print(f"  Forms Found: {len(forms)}")
+            for idx, form in enumerate(forms, 1):
+                action = form.attrs.get("action", "")
+                method = form.attrs.get("method", "get").lower()
+                print(f"    Form #{idx}:")
+                print(f"      Action: {urljoin(url, action)}")
+                print(f"      Method: {method}")
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="TEOTW - The Eye Of The Web - Web Crawler & Scanner")
-    parser.add_argument("-u", "--url", help="Target URL to scan")
-    parser.add_argument("-l", "--list", help="File containing list of URLs to scan")
+                inputs = form.find_all(["input", "textarea", "select"])
+                for input_tag in inputs:
+                    name = input_tag.attrs.get("name")
+                    input_type = input_tag.attrs.get("type", "text")
+                    if name:
+                        print(f"        - name: {name}, type: {input_type}")
+
+                status_code = submit_form(form, url)
+                if status_code:
+                    print(f"      Form submission response code: {status_code}")
+
+    soup = BeautifulSoup(res.content, "html.parser")
+    links = soup.find_all("a", href=True)
+
+    for link_tag in links:
+        link = urljoin(url, link_tag["href"])
+        if is_same_domain(link, base_netloc):
+            # Just submit crawl tasks, no printing here
+            future = executor.submit(crawl, link, depth + 1, max_depth, base_netloc, clear, executor, futures)
+            futures.append(future)
+            time.sleep(0.1)
+
+def main():
+    parser = argparse.ArgumentParser(description="TEOTW - The Eye Of The Web")
+    parser.add_argument("-u", "--url", help="Target URL", required=True)
+    parser.add_argument("-d", "--depth", help="Crawling depth", type=int, default=2)
+    parser.add_argument("--clear", help="Clear output mode (URLs only)", action="store_true")
+    parser.add_argument("-p", "--processors", help="Number of processors (threads) to use", type=int, default=1)
+    parser.add_argument("-t", "--test", help="Test flag", action="store_true")
     args = parser.parse_args()
 
     print_banner()
+    print("\n" + "-" * 60)
+    print(f"Crawling URL: {args.url}")
+    print(f"Processors set to: {args.processors}")
+    if args.test:
+        print("Test flag is ON")
 
-    targets = []
+    base_netloc = urlparse(args.url).netloc
 
-    if args.url:
-        targets.append(args.url.strip())
-    elif args.list:
-        try:
-            with open(args.list, 'r') as file:
-                targets.extend([line.strip() for line in file if line.strip()])
-        except Exception as e:
-            print(f"[ERROR] Failed to read file: {e}")
-            exit(1)
-    else:
-        print("[-] Please provide a URL (-u) or list of URLs (-l)")
-        exit(1)
+    with ThreadPoolExecutor(max_workers=args.processors) as executor:
+        futures = []
+        crawl(args.url, 0, args.depth, base_netloc, args.clear, executor, futures)
+        for future in as_completed(futures):
+            pass  # wait for all threads
 
-    for target in targets:
-        if not target.startswith(("http://", "https://")):
-            target = "http://" + target
-        crawl(target)
+if __name__ == "__main__":
+    main()
